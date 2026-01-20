@@ -1,3 +1,6 @@
 # Ignore database files
 .db_data/
 .env
+
+# Ignore temporary files
+tmp/
