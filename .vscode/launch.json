@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Ambassador API",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/main.go",
+      "env": {
+        "DB_HOST": "localhost",
+        "DB_PORT": "3307",
+        "DB_USER": "root",
+        "DB_PASSWORD": "root",
+        "DB_NAME": "ambassador",
+        "APP_PORT": "8001",
+        "ENVIRONMENT": "development"
+      },
+      "args": []
+    },
+    {
+      "name": "Attach to Docker Backend",
+      "type": "go",
+      "request": "attach",
+      "mode": "remote",
+      "remotePath": "",
+      "port": 2345,
+      "host": "127.0.0.1"
+    }
+  ]
+}

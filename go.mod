@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.12
 
 require (
+	github.com/bxcodec/faker/v3 v3.8.1
 	github.com/gofiber/fiber/v2 v2.52.10
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/joho/godotenv v1.5.1

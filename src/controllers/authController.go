@@ -344,3 +344,70 @@ func UpdateInfo(c *fiber.Ctx) error {
         IsAmbassador: user.IsAmbassador,
     })
 }
+
+type UpdatePasswordRequest struct {
+    CurrentPassword    string `json:"current_password" validate:"required,min=8"`
+    NewPassword        string `json:"new_password" validate:"required,min=8,max=72"`
+    NewPasswordConfirm string `json:"new_password_confirm" validate:"required"`
+}
+
+func UpdatePassword(c *fiber.Ctx) error {
+    // Get authenticated user from context (same as UpdateInfo)
+    user, err := middlewares.GetUser(c)
+    if err != nil {
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "unauthenticated",
+        })
+    }
+
+    // Parse request body
+    var data UpdatePasswordRequest
+    if err := c.BodyParser(&data); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid request body",
+        })
+    }
+
+    // Validate passwords match
+    if data.NewPassword != data.NewPasswordConfirm {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "new passwords do not match",
+        })
+    }
+
+    // Validate new password length
+    if len(data.NewPassword) < 8 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "new password must be at least 8 characters",
+        })
+    }
+
+    // Verify current password
+    if err := utils.CheckPassword(user.Password, data.CurrentPassword); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "current password is incorrect",
+        })
+    }
+
+     // Hash new password
+    newHashedPassword, err := utils.HashPassword(data.NewPassword)
+    if err != nil {
+        log.Printf("Password hashing failed: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to update password",
+        })
+    }
+
+    // Update password in database
+    user.Password = []byte(newHashedPassword)
+    if err := database.DB.Save(&user).Error; err != nil {
+        log.Printf("Password update failed: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to update password",
+        })
+    }
+
+    return c.JSON(fiber.Map{
+        "message": "password updated successfully",
+    })
+}

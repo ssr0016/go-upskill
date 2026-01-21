@@ -130,9 +130,7 @@ func AutoMigrate() error {
     // Migrate all models
     if err := DB.AutoMigrate(
         &models.User{},
-        // Add other models here as you create them
-        // &models.Product{},
-        // &models.Order{},
+        &models.Product{},
     ); err != nil {
         return fmt.Errorf("auto migrate failed: %w", err)
     }

@@ -1,0 +1,302 @@
+package controllers
+
+import (
+	"ambassador/src/database"
+	"ambassador/src/models"
+	"errors"
+	"log"
+	"strconv"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
+)
+
+type CreateProductRequest struct {
+    Title        string  `json:"title" validate:"required,min=1,max=255"`
+    Description string  `json:"description" validate:"required,min=10,max=1000"`
+    Image       string  `json:"image" validate:"required,url"`
+    Price       float64 `json:"price" validate:"required,min=0,max=100000"`
+}
+
+type ProductResponse struct {
+    ID          uint    `json:"id"`
+    Title        string `json:"title"`
+    Description string  `json:"description"`
+    Image       string  `json:"image"`
+    Price       float64 `json:"price"`
+}
+
+type ProductListResponse struct {
+    ID          uint    `json:"id"`
+    Title       string  `json:"title"`
+    Description string  `json:"description"`
+    Image       string  `json:"image"`
+    Price       float64 `json:"price"`
+}
+
+func Products(c *fiber.Ctx) error {
+	var products  []ProductListResponse
+
+	// Fetch ALL products with ONLY needed fields
+	if err := database.DB.
+        Model(&models.Product{}).
+        Select("id, title, description, image, price").
+        Find(&products).Error; err != nil {
+        
+        log.Printf("Failed to fetch products: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to fetch products",
+        })
+    }
+
+ 	return c.JSON(products) 
+}
+
+func CreateProducts(c *fiber.Ctx) error {
+	var data CreateProductRequest
+
+	 if err := c.BodyParser(&data); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid request body",
+        })
+    }
+
+	// Normalize input
+    data.Title = strings.TrimSpace(data.Title)
+    data.Description = strings.TrimSpace(data.Description)
+    data.Image = strings.TrimSpace(data.Image)
+
+	 // Validate (Register pattern)
+    if data.Title == "" || data.Description == "" || data.Image == "" || data.Price < 0 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "title, description, image, and price are required",
+        })
+    }
+
+	if data.Price > 100000 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "price too high (max $100,000)",
+        })
+    }
+
+	product := models.Product{
+        Title:        data.Title,
+        Description: data.Description,
+        Image:       data.Image,
+        Price:       data.Price,
+    }
+
+    if err := database.DB.Create(&product).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create"})
+    }
+
+    // MANUAL MAPPING - Exact control
+    return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+        "message": "product created successfully",
+        "data": ProductResponse{
+            ID:          product.ID,
+            Title:       product.Title,
+            Description: product.Description,
+            Image:       product.Image,
+            Price:       product.Price,
+        },
+    })
+}
+
+
+
+func GetProduct(c *fiber.Ctx) error {
+	// Parse & validate ID (same pattern as Register)
+	idStr := c.Params("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		 return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid product ID",
+        })
+	}
+
+	if id <= 0 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "product ID must be positive",
+        })
+    }
+
+	// Fetch product with error handling (same as Products)
+	var product ProductResponse
+    if err := database.DB.
+        Model(&models.Product{}).
+        Where("id = ?", id).
+        Select("id, title, description, image, price").  
+        First(&product).Error; err != nil {
+        
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+                "error": "product not found",
+            })
+        }
+        
+        log.Printf("Failed to fetch product %d: %v", id, err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to fetch product",
+        })
+    }
+
+	 return c.JSON(product)
+}
+
+type UpdateProductRequest struct {
+    Title       string  `json:"title" validate:"omitempty,min=1,max=255"`
+    Description string  `json:"description" validate:"omitempty,min=10,max=1000"`
+    Image       string  `json:"image" validate:"omitempty,url"`
+    Price       float64 `json:"price" validate:"omitempty,min=0,max=100000"`
+}
+
+func UpdateProduct(c *fiber.Ctx) error {
+	 // Parse & validate ID (same as GetProduct)
+	idStr := c.Params("id")
+    id, err := strconv.Atoi(idStr)
+    if err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid product ID",
+        })
+    }
+
+	if id <= 0 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "product ID must be positive",
+        })
+    }
+
+	// Parse request body (same as CreateProduct)
+    var data UpdateProductRequest
+    if err := c.BodyParser(&data); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid request body",
+        })
+    }
+
+	// Normalize input (same pattern)
+    data.Title = strings.TrimSpace(data.Title)
+    data.Description = strings.TrimSpace(data.Description)
+    data.Image = strings.TrimSpace(data.Image)
+
+
+	// Validate at least one field provided
+    if data.Title == "" && data.Description == "" && data.Image == "" && data.Price == 0 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "at least one field must be provided",
+        })
+    }
+
+	// Fetch existing product first
+    var existingProduct models.Product
+    if err := database.DB.First(&existingProduct, id).Error; err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+                "error": "product not found",
+            })
+        }
+        log.Printf("Failed to fetch product %d: %v", id, err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to fetch product",
+        })
+    }
+
+	// Update only provided fields (partial update)
+    updates := map[string]interface{}{}
+
+    if data.Title != "" {
+        existingProduct.Title = data.Title  // or Name if your model uses Name
+        updates["title"] = data.Title
+    }
+
+    if data.Description != "" {
+        existingProduct.Description = data.Description
+        updates["description"] = data.Description
+    }
+
+    if data.Image != "" {
+        existingProduct.Image = data.Image
+        updates["image"] = data.Image
+    }
+
+    if data.Price > 0 {
+        existingProduct.Price = data.Price
+        updates["price"] = data.Price
+    }
+
+	// Save to database
+    if err := database.DB.Model(&existingProduct).Updates(updates).Error; err != nil {
+        log.Printf("Failed to update product %d: %v", id, err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to update product",
+        })
+    }
+
+	// Return shaped response (same as GetProduct)
+    response := ProductResponse{
+        ID:          existingProduct.ID,
+        Title:       existingProduct.Title,
+        Description: existingProduct.Description,
+        Image:       existingProduct.Image,
+        Price:       existingProduct.Price,
+    }
+
+    return c.JSON(fiber.Map{
+        "message": "product updated successfully",
+        "data":    response,
+    })
+}
+
+func DeleteProduct(c *fiber.Ctx) error {
+	 // Parse & validate ID (same as GetProduct)
+	idStr := c.Params("id")
+    id, err := strconv.Atoi(idStr)
+    if err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid product ID",
+        })
+    }
+
+	if id <= 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "product ID must be positive",
+		})
+	}
+
+	// Fetch existing product first
+	var existingProduct models.Product
+	if err := database.DB.First(&existingProduct, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "product not found",
+			})
+		}
+		log.Printf("Failed to fetch product %d: %v", id, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to fetch product",
+		})
+	}
+
+	// Delete from database (perfect) - Soft delete with gorm.Model
+    result := database.DB.Delete(&existingProduct)
+    if result.Error != nil {
+        log.Printf("Failed to delete product %d: %v", id, result.Error)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to delete product",
+        })
+    }
+
+	// Verify delete worked
+    if result.RowsAffected == 0 {
+        log.Printf("No rows affected when deleting product %d", id)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to delete product",
+        })
+    }
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+    	"message": "product deleted successfully",
+	})
+}

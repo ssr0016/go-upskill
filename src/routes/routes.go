@@ -4,7 +4,6 @@ import (
 	"ambassador/src/config"
 	"ambassador/src/controllers"
 	"ambassador/src/middlewares"
-	"log"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -50,9 +49,18 @@ func Setup(app *fiber.App, cfg *config.Config) {
     
     adminProtected.Get("/user", controllers.User)
     adminProtected.Post("/logout", controllers.Logout)
-    adminProtected.Put("/user/info", controllers.UpdateInfo)
+    adminProtected.Put("/users/info", controllers.UpdateInfo)
+    adminProtected.Put("/users/password", controllers.UpdatePassword)
 
-    log.Println("✅ Admin routes configured")
+    // PROTECTED AMBASSADOR ROUTES - /api/ambassador
+    adminProtected.Get("/ambassadors", controllers.Ambassadors)
+
+    // Products
+    adminProtected.Get("/products", controllers.Products)
+    adminProtected.Post("/products", controllers.CreateProducts)
+    adminProtected.Get("/products/:id", controllers.GetProduct)
+    adminProtected.Put("/products/:id", controllers.UpdateProduct)
+    adminProtected.Delete("/products/:id", controllers.DeleteProduct)
 }
 
 // setupGlobalMiddleware configures middleware for all routes
