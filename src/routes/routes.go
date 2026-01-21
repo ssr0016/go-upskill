@@ -67,6 +67,18 @@ func Setup(app *fiber.App, cfg *config.Config) {
 
     // Orders
     adminProtected.Get("/orders", controllers.Orders)
+
+    // AMBASSADOR ROUTES
+    ambassador := api.Group("/ambassador")
+    ambassador.Post("/register", authLimiter, controllers.Register)
+    ambassador.Post("/login", authLimiter, controllers.Login)
+
+    ambassadorAuthenticated := ambassador.Use(middlewares.IsAuthenticated)
+    ambassadorAuthenticated.Get("/user", controllers.User)
+    ambassadorAuthenticated.Post("/logout", controllers.Logout)
+    ambassadorAuthenticated.Put("/users/info", controllers.UpdateInfo)
+    ambassadorAuthenticated.Put("/users/password", controllers.UpdatePassword)
+    
 }
 
 // setupGlobalMiddleware configures middleware for all routes

@@ -73,13 +73,16 @@ func Register(c *fiber.Ctx) error {
         })
     }
 
+    // Determine if ambassador and exact path prefix match for /api/ambassador/register
+    isAmbassador := strings.HasPrefix(c.Path(), "/api/ambassador")
+
 	// Create user
     user := models.User{
         FirstName:    data.FirstName,
         LastName:     data.LastName,
         Email:        data.Email,
         Password:     []byte(hashedPassword), // Fix: convert to []byte
-        IsAmbassador: false,
+        IsAmbassador: isAmbassador, 
     }
 
 	// INSERT FIRST — DB ENFORCES UNIQUENESS
