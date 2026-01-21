@@ -154,7 +154,7 @@ func Close() error {
         return fmt.Errorf("failed to close database: %w", err)
     }
 
-    log.Println("✅ Database connection closed")
+    log.Println("Database connection closed")
     return nil
 }
 
