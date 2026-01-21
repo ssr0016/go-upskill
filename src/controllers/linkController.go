@@ -48,6 +48,13 @@ func Link(c *fiber.Ctx) error {
         })
     }
 
+    for i, link := range links {
+        var orders models.Order
+        database.DB.Where("code = ? and complete = true", link.Code).First(&orders)
+
+        links[i].Orders = []models.Order{orders}
+    }
+
 	return c.JSON(fiber.Map{
         "links": links,
     })

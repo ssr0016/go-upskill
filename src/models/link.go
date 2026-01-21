@@ -6,4 +6,7 @@ type Link struct {
     UserID  uint      `json:"user_id" gorm:"index"`
     User    User      `json:"user" gorm:"foreignKey:UserID"`
     Products []Product `json:"products" gorm:"many2many:link_products;"`
+
+    // Virtual fields
+    Orders []Order `json:"order" gorm:"-"`
 }

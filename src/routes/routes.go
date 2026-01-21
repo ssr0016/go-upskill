@@ -64,6 +64,9 @@ func Setup(app *fiber.App, cfg *config.Config) {
 
     // Links
     adminProtected.Get("users/:id/links", controllers.Link)
+
+    // Orders
+    adminProtected.Get("/orders", controllers.Orders)
 }
 
 // setupGlobalMiddleware configures middleware for all routes

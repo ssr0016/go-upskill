@@ -132,6 +132,8 @@ func AutoMigrate() error {
         &models.User{},
         &models.Product{},
         &models.Link{},
+        &models.Order{},
+        &models.OrderItem{},
     ); err != nil {
         return fmt.Errorf("auto migrate failed: %w", err)
     }
