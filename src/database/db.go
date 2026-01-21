@@ -131,6 +131,7 @@ func AutoMigrate() error {
     if err := DB.AutoMigrate(
         &models.User{},
         &models.Product{},
+        &models.Link{},
     ); err != nil {
         return fmt.Errorf("auto migrate failed: %w", err)
     }

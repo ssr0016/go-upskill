@@ -61,6 +61,9 @@ func Setup(app *fiber.App, cfg *config.Config) {
     adminProtected.Get("/products/:id", controllers.GetProduct)
     adminProtected.Put("/products/:id", controllers.UpdateProduct)
     adminProtected.Delete("/products/:id", controllers.DeleteProduct)
+
+    // Links
+    adminProtected.Get("users/:id/links", controllers.Link)
 }
 
 // setupGlobalMiddleware configures middleware for all routes
