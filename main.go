@@ -4,11 +4,13 @@ import (
 	"ambassador/src/config"
 	"ambassador/src/database"
 	"ambassador/src/routes"
-	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
 func main () {
@@ -18,40 +20,83 @@ func main () {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Connect to the database
-	database.Connect()
+    log.Printf("Starting application in %s mode", cfg.Environment)
 
-	// Auto-migrate database models
-	database.AutoMigrate()	
+	// Connect to database
+    if err := database.Connect(cfg); err != nil {
+        log.Fatalf("Database connection failed: %v", err)
+    }
 
+	// Run migrations
+    if err := database.AutoMigrate(); err != nil {
+        log.Fatalf("Database migration failed: %v", err)
+    }
 
-	app := fiber.New()
+	// Initialize Fiber app
+    app := fiber.New(fiber.Config{
+        AppName:               "Ambassador API",
+        ErrorHandler:          customErrorHandler,
+        ReadTimeout:           10 * time.Second,
+        WriteTimeout:          10 * time.Second,
+        IdleTimeout:           120 * time.Second,
+        DisableStartupMessage: false,
+        ServerHeader:          "Ambassador",
+        StrictRouting:         true,
+        CaseSensitive:         true,
+    })
 
-	origins := cfg.CORSOrigins
-	if origins == "" {
-		origins = "*"
-	}
+	 // Setup routes
+    routes.Setup(app, cfg)
 
-	// CORS middleware
-	app.Use(cors.New(cors.Config{
-	AllowOrigins:     cfg.CORSOrigins,
-	AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
-	AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-	AllowCredentials: true,
-}))
+	// Setup graceful shutdown
+	setupGracefulShutdown(app)
 
-	// Setup routes
-	routes.Setup(app)
+// Start server
+    log.Printf("Server starting on port %s", cfg.AppPort)
+    if err := app.Listen(":" + cfg.AppPort); err != nil {
+        log.Fatalf("Server failed to start: %v", err)
+    }
+}
 
-	// Use the port from .env
-	port := cfg.AppPort
-	if port == "" {
-		port = "8000"
-	}
+func customErrorHandler(c *fiber.Ctx, err error) error {
+    code := fiber.StatusInternalServerError
+    message := "Internal server error"
 
-	fmt.Printf("Server running on port %s\n", port)
-	err = app.Listen(":" + port)
-	if err != nil {
-		log.Fatalf("failed to start server: %v", err)
-	}
+    if e, ok := err.(*fiber.Error); ok {
+        code = e.Code
+        message = e.Message
+    }
+
+    // Don't expose internal errors in production
+    cfg := config.Get()
+    if cfg.IsProduction() && code == fiber.StatusInternalServerError {
+        message = "Internal server error"
+    }
+
+    return c.Status(code).JSON(fiber.Map{
+        "error": message,
+    })
+}
+
+func setupGracefulShutdown(app *fiber.App) {
+    go func() {
+        sigChan := make(chan os.Signal, 1)
+        signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+        <-sigChan
+
+        log.Println("Shutting down gracefully...")
+
+        // Shutdown Fiber with timeout
+        if err := app.ShutdownWithTimeout(30 * time.Second); err != nil {
+            log.Printf("Error during server shutdown: %v", err)
+        }
+
+        // Close database
+        if err := database.Close(); err != nil {
+            log.Printf("Error closing database: %v", err)
+        }
+
+        log.Println("Shutdown complete")
+        os.Exit(0)
+    }()
 }

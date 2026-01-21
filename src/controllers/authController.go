@@ -3,8 +3,11 @@ package controllers
 import (
 	"ambassador/src/config"
 	"ambassador/src/database"
+	"ambassador/src/middlewares"
 	"ambassador/src/models"
 	"ambassador/src/utils"
+	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,12 +16,14 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 )
 
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
 type RegisterRequest struct {
-	FirstName       string `json:"first_name"`
-    LastName        string `json:"last_name"`
-    Email           string `json:"email"`
-    Password        string `json:"password"`
-    PasswordConfirm string `json:"password_confirm"`
+    FirstName       string `json:"first_name" validate:"required,min=1,max=100"`
+    LastName        string `json:"last_name" validate:"required,min=1,max=100"`
+    Email           string `json:"email" validate:"required,email,max=255"`
+    Password        string `json:"password" validate:"required,min=8,max=72"`
+    PasswordConfirm string `json:"password_confirm" validate:"required"`
 }
 
 type UserResponse struct {
@@ -29,7 +34,6 @@ type UserResponse struct {
     IsAmbassador bool  `json:"is_ambassador"`
 }
 
-
 func Register(c *fiber.Ctx) error {
 	// data from request
 	var data RegisterRequest
@@ -38,86 +42,101 @@ func Register(c *fiber.Ctx) error {
    if err != nil {
 	 return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 		"error": "invalid request body",
-        "details": err.Error(),
 	})
    }
 
-   // check required fields
-   data.FirstName = strings.TrimSpace(data.FirstName)
-   data.LastName = strings.TrimSpace(data.LastName)
-   data.Email = strings.TrimSpace(strings.ToLower(data.Email))
-   data.Password = strings.TrimSpace(data.Password)
-   data.PasswordConfirm = strings.TrimSpace(data.PasswordConfirm)
+   	// normalize input
+	data.FirstName = strings.TrimSpace(data.FirstName)
+    data.LastName = strings.TrimSpace(data.LastName)
+    data.Email = strings.ToLower(strings.TrimSpace(data.Email))
+
+   // required fields
    if data.FirstName == "" || data.LastName == "" || data.Email == "" || data.Password == "" || data.PasswordConfirm == "" {
 	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 		"error": "all fields are required",
 	})
    }
 
-	// password validation
-	if data.Password != data.PasswordConfirm {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-            "error": "passwords do not match",
+   // Validate input
+   if err := validateRegistration(&data); err != nil {
+	   return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error":   err.Error(),
+	})
+   }
+
+	// Hash password
+    hashedPassword, err := utils.HashPassword(data.Password)
+    if err != nil {
+        log.Printf("Password hashing failed: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "Registration failed",
         })
     }
 
-	// email validation
-	var existingUser models.User
-	database.DB.Where("email = ?", data.Email).First(&existingUser)
-	if existingUser.ID != 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "email already in use",
-		})
-	}
-
-	// password length check
-	if len(data.Password) < 8 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "password must be at least 8 characters",
-		})
-	}		
-
-	// hash password
-	hashedPassword, err := utils.HashPassword(data.Password) 
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "cannot hash password",
-			"details": err.Error(),
-		})
-	}
-
-	// create a user
-	   user := models.User{
+	// Create user
+    user := models.User{
         FirstName:    data.FirstName,
         LastName:     data.LastName,
         Email:        data.Email,
-        Password:     hashedPassword,
+        Password:     []byte(hashedPassword), // Fix: convert to []byte
         IsAmbassador: false,
     }
 
-	// call database to save user
-   if err := database.DB.Create(&user).Error; err != nil {
+	// INSERT FIRST — DB ENFORCES UNIQUENESS
+    if err := database.DB.Create(&user).Error; err != nil {
+        if strings.Contains(err.Error(), "Duplicate entry") || 
+           strings.Contains(err.Error(), "UNIQUE constraint") {
+            // Generic message to prevent user enumeration
+            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+                "error": "Registration failed",
+            })
+        }
+        log.Printf("User creation failed: %v", err)
         return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-            "error":   "cannot create user",
-            "details": err.Error(),
+            "error": "Registration failed",
         })
     }
 
-	// payload response
-	response := UserResponse{
-		ID:          user.ID,
-		FirstName:   user.FirstName,
-		LastName:    user.LastName,
-		Email:       user.Email,
-		IsAmbassador: user.IsAmbassador,
-	}
+	return c.Status(fiber.StatusCreated).JSON(UserResponse{
+        ID:           user.ID,
+        FirstName:    user.FirstName,
+        LastName:     user.LastName,
+        Email:        user.Email,
+        IsAmbassador: user.IsAmbassador,
+    })
+}
 
-	return c.JSON(response)
+func validateRegistration(data *RegisterRequest) error {
+	 // Required fields
+    if data.FirstName == "" || data.LastName == "" || 
+       data.Email == "" || data.Password == "" || data.PasswordConfirm == "" {
+        return fiber.NewError(fiber.StatusBadRequest, "All fields are required")
+    }
+
+	// Email format
+    if !emailRegex.MatchString(data.Email) {
+        return fiber.NewError(fiber.StatusBadRequest, "Invalid email format")
+    }
+
+	// Password rules
+    if len(data.Password) < 8 {
+        return fiber.NewError(fiber.StatusBadRequest, "Password must be at least 8 characters")
+    }
+    if len(data.Password) > 72 {
+        return fiber.NewError(fiber.StatusBadRequest, "Password too long")
+    }
+
+    // Password match
+    if data.Password != data.PasswordConfirm {
+        return fiber.NewError(fiber.StatusBadRequest, "Passwords do not match")
+    }
+
+    return nil
 }
 
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+    Email    string `json:"email" validate:"required,email"`
+    Password string `json:"password" validate:"required"`
 }
 
 func Login(c *fiber.Ctx) error {
@@ -131,18 +150,19 @@ func Login(c *fiber.Ctx) error {
 		})
 	}
 
-	// check required fields
-	data.Email = strings.TrimSpace(strings.ToLower(data.Email))
-	data.Password = strings.TrimSpace(data.Password)
-	if data.Email == "" || data.Password == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "email and password are required",
-		})
-	}
+	// Normalize email only (NOT password)
+    data.Email = strings.ToLower(strings.TrimSpace(data.Email))
 
-	// find user by email
-	var user models.User
-	result := database.DB.Where("email = ?", data.Email).First(&user)
+	// Validate required fields
+    if data.Email == "" || data.Password == "" {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "Email and password are required",
+        })
+    }
+
+	 // Find user by email
+    var user models.User
+    result := database.DB.Where("email = ?", data.Email).First(&user)
 
 	if result.Error != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -150,92 +170,89 @@ func Login(c *fiber.Ctx) error {
 		})
 	}
 
+	// IMPORTANT: Always check password even if user not found
+    // This prevents timing attacks that reveal valid emails
+    dummyHash := []byte("$2a$10$placeholder.hash.to.prevent.timing.attack.vulnerabilities")
+
+	if result.Error != nil {
+        // Run password check anyway to maintain constant timing
+        _ = utils.CheckPassword(dummyHash, data.Password)
+        
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "Invalid credentials",
+        })
+    }
+
 	// check password
 	err = utils.CheckPassword(user.Password, data.Password)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid email or password",
-		})
+		log.Printf("Failed login attempt for email: %s", data.Email)
+
+		 return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "Invalid credentials",
+        })
 	}
 
-	// payload response
-	response := UserResponse{
-		ID:          user.ID,
-		FirstName:   user.FirstName,
-		LastName:    user.LastName,
-		Email:       user.Email,
-		IsAmbassador: user.IsAmbassador,		
-	}
-
-	// generate JWT token
-	cfg := config.Get()
-	claims := jwt.RegisteredClaims{
-		Subject:   strconv.Itoa(int(user.ID)),
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * time.Duration(cfg.JWTExpireHours))),
-	}
+	// Generate JWT token
+    cfg := config.Get()
+    claims := jwt.RegisteredClaims{
+        Subject:   strconv.Itoa(int(user.ID)),
+        ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * time.Duration(cfg.JWTExpireHours))),
+        IssuedAt:  jwt.NewNumericDate(time.Now()),
+    }
 
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(cfg.JWTSecret))
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "invalid credentials",
-		})
-	}
+    if err != nil {
+        log.Printf("JWT generation failed: %v", err)
+        
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "Authentication failed",
+        })
+    }
 
-	c.Cookie(&fiber.Cookie{
-		Name:     "jwt",
-		Value:    token,
-		Expires:  time.Now().Add(time.Hour * time.Duration(cfg.JWTExpireHours)),
-		HTTPOnly: true,
-	})
+	 // Set secure cookie
+    c.Cookie(&fiber.Cookie{
+        Name:     "jwt",
+        Value:    token,
+        Expires:  time.Now().Add(time.Hour * time.Duration(cfg.JWTExpireHours)),
+        HTTPOnly: true,
+        Secure:   true,
+        SameSite: "Lax",                           // CSRF protection
+    })
 
-	return c.JSON(fiber.Map{
-		"message": "login successful",
-		"token":   token,
-		"user":    response,
-	})
+	 // Prepare response
+    response := UserResponse{
+        ID:           user.ID,
+        FirstName:    user.FirstName,
+        LastName:     user.LastName,
+        Email:        user.Email,
+        IsAmbassador: user.IsAmbassador,
+    }
+
+	 return c.JSON(fiber.Map{
+        "message": "Login successful",
+        "user":    response,
+        // Don't return token if using cookie-based auth
+    })
 }
 
-// Get the authenticated user
+// User returns the authenticated user
 func User(c *fiber.Ctx) error {
-	cookie := c.Cookies("jwt")
-	if cookie == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "unauthenticated",
-		})
-	}
+    // Get user from context using middleware helper
+    user, err := middlewares.GetUser(c)
+    if err != nil {
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "unauthenticated",
+        })
+    }
 
-	token, err := jwt.ParseWithClaims(cookie, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
-		cfg := config.Get()
-		return []byte(cfg.JWTSecret), nil
-	})
-
-	if err != nil || !token.Valid {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "unauthenticated",
-		})
-	}
-
-	claims, ok := token.Claims.(*jwt.RegisteredClaims)
-	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "unauthenticated",
-		})
-	}	
-
-	var user models.User
-	err = database.DB.Where("id = ?", claims.Subject).First(&user).Error
-	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "unauthenticated",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"id":            user.ID,
-		"first_name":    user.FirstName,
-		"last_name":     user.LastName,
-		"email":         user.Email,
-	})
+    return c.JSON(UserResponse{
+        ID:           user.ID,
+        FirstName:    user.FirstName,
+        LastName:     user.LastName,
+        Email:        user.Email,
+        IsAmbassador: user.IsAmbassador,
+    })
 }
 
 func Logout(c *fiber.Ctx) error {
@@ -251,4 +268,79 @@ func Logout(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"message": "successfully logged out",
 	})
+}
+
+type UpdateUserRequest struct {
+    FirstName string `json:"first_name"`
+    LastName  string `json:"last_name"`
+    Email     string `json:"email"`
+}
+
+func UpdateInfo(c *fiber.Ctx) error {
+    // Get authenticated user from context
+    user, err := middlewares.GetUser(c)
+    if err != nil {
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "unauthenticated",
+        })
+    }
+
+     var data UpdateUserRequest
+
+    if err := c.BodyParser(&data); err != nil {
+            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+                "error": "invalid request body",
+            })
+    }
+
+     // Normalize input
+    data.FirstName = strings.TrimSpace(data.FirstName)
+    data.LastName = strings.TrimSpace(data.LastName)
+    data.Email = strings.ToLower(strings.TrimSpace(data.Email))
+
+    // Validate at least one field is provided
+    if data.FirstName == "" && data.LastName == "" && data.Email == "" {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "at least one field is required",
+        })
+    }
+
+    // Update only provided fields
+    if data.FirstName != "" {
+        user.FirstName = data.FirstName
+    }
+    if data.LastName != "" {
+        user.LastName = data.LastName
+    }
+    if data.Email != "" {
+        // Validate email format
+        if !emailRegex.MatchString(data.Email) {
+            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+                "error": "invalid email format",
+            })
+        }
+        user.Email = data.Email
+    }
+
+     // Save to database
+    if err := database.DB.Save(&user).Error; err != nil {
+        if strings.Contains(err.Error(), "Duplicate entry") || 
+           strings.Contains(err.Error(), "UNIQUE constraint") {
+            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+                "error": "email already in use",
+            })
+        }
+        log.Printf("User update failed: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to update user",
+        })
+    }
+
+    return c.JSON(UserResponse{
+        ID:           user.ID,
+        FirstName:    user.FirstName,
+        LastName:     user.LastName,
+        Email:        user.Email,
+        IsAmbassador: user.IsAmbassador,
+    })
 }
