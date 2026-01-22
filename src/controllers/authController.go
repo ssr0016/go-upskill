@@ -29,6 +29,7 @@ type UserResponse struct {
     LastName    string `json:"last_name"`
     Email       string `json:"email"`
     IsAmbassador bool  `json:"is_ambassador"`
+    Revenue     *float64 `json:"revenue,omitempty" gorm:"-"`
 }
 
 func Register(c *fiber.Ctx) error {
@@ -208,7 +209,6 @@ func Login(c *fiber.Ctx) error {
 
 // User returns the authenticated user
 func User(c *fiber.Ctx) error {
-    // Get user from context using middleware helper
     user, err := middlewares.GetUser(c)
     if err != nil {
         return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -216,14 +216,19 @@ func User(c *fiber.Ctx) error {
         })
     }
 
+    // Calculate revenue
+    user.Revenue = user.CalculateRevenue(database.DB)
+
     return c.JSON(UserResponse{
         ID:           user.ID,
         FirstName:    user.FirstName,
         LastName:     user.LastName,
         Email:        user.Email,
         IsAmbassador: user.IsAmbassador,
+        Revenue:      &user.Revenue, 
     })
 }
+
 
 func Logout(c *fiber.Ctx) error {
 	cookie := fiber.Cookie{
