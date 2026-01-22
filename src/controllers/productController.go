@@ -5,6 +5,7 @@ import (
 	"ambassador/src/models"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -352,5 +353,70 @@ func ProductFrontEnd(c *fiber.Ctx) error {
         "data": products,
         "source": "database",
         "cached": false,
+    })
+}
+
+type ProductBackendResponse struct {
+    Cached  bool                   `json:"cached"`
+    Data    []ProductListResponse  `json:"data"`
+    Query   string                 `json:"query"`
+    Source  string                 `json:"source"`
+    Count   int                    `json:"count"`
+}
+
+func ProductBackend(c *fiber.Ctx) error {
+    ctx := c.Context()
+    
+    // DYNAMIC CACHE KEY based on search
+    searchQuery := strings.TrimSpace(c.Query("s", ""))
+    normalizedQuery := strings.ToLower(searchQuery)
+    cacheKey := fmt.Sprintf("products_backend:s:%s", normalizedQuery)
+    
+    // 1. CHECK CACHE FIRST
+    if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
+        log.Printf("Cache HIT for %s", cacheKey)
+        var products []ProductListResponse
+        if jsonErr := json.Unmarshal([]byte(cached), &products); jsonErr == nil {
+            return c.JSON(ProductBackendResponse{
+                Cached:  true,
+                Data:    products,
+                Query:   searchQuery,
+                Source:  "cache",
+                Count:   len(products),
+            })
+        }
+    }
+    
+    // 2. CACHE MISS → SMART DB QUERY
+    log.Printf("Cache MISS → Searching '%s'", searchQuery)
+    var products []ProductListResponse
+    
+    db := database.DB.Model(&models.Product{}).Select("id, title, description, image, price")
+    
+    if searchQuery != "" {
+        searchTerm := "%" + normalizedQuery + "%"
+        db = db.Where("LOWER(title) LIKE ? OR LOWER(description) LIKE ?", 
+                     searchTerm, searchTerm)
+    }
+    
+    if err := db.Find(&products).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to fetch products",
+        })
+    }
+    
+    // 3. CACHE RESULTS
+    if jsonData, err := json.Marshal(products); err == nil {
+        ttl := 10 * time.Minute
+        database.CacheSet(ctx, cacheKey, jsonData, ttl)
+        log.Printf("Cached %d products for '%s'", len(products), searchQuery)
+    }
+    
+    return c.JSON(ProductBackendResponse{
+        Cached:  false,
+        Data:    products,
+        Query:   searchQuery,
+        Source:  "database",
+        Count:   len(products),
     })
 }
