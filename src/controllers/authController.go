@@ -1,19 +1,16 @@
 package controllers
 
 import (
-	"ambassador/src/config"
 	"ambassador/src/database"
 	"ambassador/src/middlewares"
 	"ambassador/src/models"
 	"ambassador/src/utils"
 	"log"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
@@ -145,13 +142,12 @@ type LoginRequest struct {
 func Login(c *fiber.Ctx) error {
 	var data LoginRequest
 
-	err := c.BodyParser(&data)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid request body",
-			"details": err.Error(),
-		})
-	}
+    // Parse request body
+    if err := c.BodyParser(&data); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "invalid request body",
+        })
+    }
 
 	// Normalize email only (NOT password)
     data.Email = strings.ToLower(strings.TrimSpace(data.Email))
@@ -163,67 +159,38 @@ func Login(c *fiber.Ctx) error {
         })
     }
 
-	 // Find user by email
+	// Find user by email
     var user models.User
-    result := database.DB.Where("email = ?", data.Email).First(&user)
-
-	if result.Error != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid email or password",
-		})
-	}
-
-	// IMPORTANT: Always check password even if user not found
-    // This prevents timing attacks that reveal valid emails
-    dummyHash := []byte("$2a$10$placeholder.hash.to.prevent.timing.attack.vulnerabilities")
-
-	if result.Error != nil {
-        // Run password check anyway to maintain constant timing
-        _ = utils.CheckPassword(dummyHash, data.Password)
-        
+    if err := database.DB.Where("email = ?", data.Email).First(&user).Error; err != nil {
+        // FIXED: Single check, no duplicate logic
         return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
             "error": "Invalid credentials",
         })
     }
 
-	// check password
-	err = utils.CheckPassword(user.Password, data.Password)
-	if err != nil {
-		log.Printf("Failed login attempt for email: %s", data.Email)
-
-		 return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+    // Check password (timing-safe)
+    if err := utils.CheckPassword(user.Password, data.Password); err != nil {
+        log.Printf("Failed login attempt for: %s", data.Email)
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
             "error": "Invalid credentials",
         })
-	}
-
-	// Generate JWT token
-    cfg := config.Get()
-    claims := jwt.RegisteredClaims{
-        Subject:   strconv.Itoa(int(user.ID)),
-        ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * time.Duration(cfg.JWTExpireHours))),
-        IssuedAt:  jwt.NewNumericDate(time.Now()),
     }
 
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(cfg.JWTSecret))
-    if err != nil {
-        log.Printf("JWT generation failed: %v", err)
-        
+    // FIXED: Use user.IsAmbassador for scope (not path)
+    scope := "admin"
+    if user.IsAmbassador {
+        scope = "ambassador"
+    }
+
+    // FIXED: Pass c to GenerateJWT
+    if err := middlewares.GenerateJWT(c, user.ID, scope); err != nil {
+        log.Printf("JWT generation failed: %v", err) // Add log import if missing
         return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-            "error": "Authentication failed",
+            "error": "Failed to generate token",
         })
     }
 
-	 // Set secure cookie
-    c.Cookie(&fiber.Cookie{
-        Name:     "jwt",
-        Value:    token,
-        Expires:  time.Now().Add(time.Hour * time.Duration(cfg.JWTExpireHours)),
-        HTTPOnly: true,
-        Secure:   true,
-        SameSite: "Lax",                           // CSRF protection
-    })
-
-	 // Prepare response
+	// Success response (cookie already set)
     response := UserResponse{
         ID:           user.ID,
         FirstName:    user.FirstName,
