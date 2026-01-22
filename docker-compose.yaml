@@ -21,6 +21,20 @@ services:
       start_period: 60s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6380:6379" # ✅ Host 6380 = NO CONFLICT with existing Redis(6379)
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data # ✅ Persistence
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build: .
     restart: unless-stopped
@@ -28,11 +42,16 @@ services:
     ports:
       - "${APP_PORT}:8000"
     environment:
-      DB_HOST: db
-      DB_PORT: 3306
+      DB_HOST: db # ✅ Docker service name
+      DB_PORT: 3306 # ✅ Container port
+      REDIS_HOST: redis # ✅ ADD THIS
+      REDIS_PORT: 6379 # ✅ ADD THIS (container port)
     depends_on:
       db:
+        condition: service_healthy
+      redis: # ✅ ADD THIS
         condition: service_healthy
 
 volumes:
   db_data:
+  redis_data: # ✅ ADD THIS

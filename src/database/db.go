@@ -14,7 +14,10 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-var DB *gorm.DB
+
+var (
+    DB    *gorm.DB
+)
 
 // Connect initializes database connection with retries
 func Connect(cfg *config.Config) error {
@@ -68,6 +71,12 @@ func Connect(cfg *config.Config) error {
 
     DB = gormDB
     log.Println("Database connected successfully")
+
+    // 🔥 REDIS CONNECTION - After MySQL success
+    if connectErr := ConnectRedis(cfg); connectErr != nil {
+        log.Printf("Warning: Redis connection failed: %v", connectErr)
+        // Don't fail startup - Redis is optional cache layer
+    }
 
     return nil
 }
@@ -198,3 +207,4 @@ func Stats() sql.DBStats {
 
     return sqlDB.Stats()
 }
+

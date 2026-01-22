@@ -22,6 +22,11 @@ type Config struct {
     DBUser     string
     DBPassword string
     DBName     string
+
+    // Redis   ADD THESE
+    RedisHost     string
+    RedisPort     string
+    RedisPassword string
     
     // JWT
     JWTSecret      string
@@ -58,6 +63,9 @@ func Load() (*Config, error) {
             DBUser:         getEnv("DB_USER", "root"),
             DBPassword:     getEnv("DB_PASSWORD", ""),
             DBName:         getEnv("DB_NAME", "ambassador"),
+            RedisHost:     getEnv("REDIS_HOST", "localhost"),
+            RedisPort:     getEnv("REDIS_PORT", "6380"),
+            RedisPassword: getEnv("REDIS_PASSWORD", ""),
             JWTSecret:      getEnv("JWT_SECRET", ""),
             JWTExpireHours: getEnvInt("JWT_EXPIRE_HOURS", 24),
             CORSOrigins:    getEnv("CORS_ORIGINS", "http://localhost:3000"),
