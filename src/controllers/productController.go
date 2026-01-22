@@ -3,10 +3,12 @@ package controllers
 import (
 	"ambassador/src/database"
 	"ambassador/src/models"
+	"encoding/json"
 	"errors"
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -299,4 +301,56 @@ func DeleteProduct(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
     	"message": "product deleted successfully",
 	})
+}
+
+func ProductFrontEnd(c *fiber.Ctx) error {
+    ctx := c.Context()
+    cacheKey := "products_frontend"
+
+    // 1. CHECK CACHE FIRST (8ms)
+    if cached, err := database.CacheGet(ctx,cacheKey); err == nil {
+       log.Printf("✅ Cache HIT for %s", cacheKey)
+
+         // Parse cached JSON back to products
+         var products []ProductListResponse
+          if jsonErr := json.Unmarshal([]byte(cached), &products); jsonErr != nil {
+            log.Printf("Cache parse error: %v", jsonErr)
+            // Continue to DB on parse error
+        }else {
+             return c.JSON(fiber.Map{
+                "data": products,
+                "source": "cache", // Debug info
+                "cached": true,
+            })
+        }
+    }
+
+    // 2. CACHE MISS → DB query (200ms)
+    log.Printf("Cache MISS -> Querying database for %s", cacheKey)
+    var products []ProductListResponse
+    
+    if err := database.DB.
+        Model(&models.Product{}).
+        Select("id, title, description, image, price").
+        Find(&products).Error; err != nil {
+        
+        log.Printf("Failed to fetch products: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to fetch products",
+        })
+    }
+    
+    // 3. CACHE RESULT (JSON → Redis, 10min TTL)
+    if jsonData, err := json.Marshal(products); err == nil {
+        ttl := 10 * time.Minute
+        if err := database.CacheSet(ctx, cacheKey, jsonData, ttl); err == nil {
+            log.Printf("Cached %d products for %v", len(products), ttl)
+        }
+    }
+    
+    return c.JSON(fiber.Map{
+        "data": products,
+        "source": "database",
+        "cached": false,
+    })
 }

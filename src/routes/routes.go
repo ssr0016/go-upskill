@@ -67,6 +67,10 @@ func Setup(app *fiber.App, cfg *config.Config) {
     ambassador := api.Group("/ambassador")
     ambassador.Post("/register", controllers.Register)
     ambassador.Post("/login", controllers.Login)
+
+    ambassador.Get("/products/frontend", controllers.ProductFrontEnd)
+    
+
     // PROTECTED AMBASSADOR ROUTES
     ambassadorAuthenticated := ambassador.Use(middlewares.IsAuthenticated,  middlewares.RequireScope("ambassador"))
     ambassadorAuthenticated.Get("/user", controllers.User)
