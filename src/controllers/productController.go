@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -310,7 +311,7 @@ func ProductFrontEnd(c *fiber.Ctx) error {
 
     // 1. CHECK CACHE FIRST (8ms)
     if cached, err := database.CacheGet(ctx,cacheKey); err == nil {
-       log.Printf("✅ Cache HIT for %s", cacheKey)
+       log.Printf("Cache HIT for %s", cacheKey)
 
          // Parse cached JSON back to products
          var products []ProductListResponse
@@ -358,94 +359,138 @@ func ProductFrontEnd(c *fiber.Ctx) error {
 
 type ProductBackendResponse struct {
     Cached  bool                   `json:"cached"`
+    TotalCount   int64              `json:"total_count"`
     Data    []ProductListResponse  `json:"data"`
     Query   string                 `json:"query"`
     Source  string                 `json:"source"`
-    Count   int                    `json:"count"`
+    Page    int                    `json:"page"`
+    PerPage int                    `json:"per_page"`
+    LastPage int                   `json:"last_page"`
 }
 
 // ProductBackend handles product listing with search and sort functionality
 // GET /api/products - Returns all products (sorted by ID)
 // GET /api/products?s=macbook - Search products (sorted by price ASC by default)
 // GET /api/products?s=macbook&sort=desc - Search products (sorted by price DESC)
+// ProductBackend handles product listing with FULL pagination, search, and sort
 func ProductBackend(c *fiber.Ctx) error {
-	ctx := c.Context()
+    ctx := c.Context()
 
-	// GET QUERY PARAMETERS
-	sortDir := c.Query("sort", "asc")           // sort=asc or sort=desc
-	searchQuery := strings.TrimSpace(c.Query("s", ""))
-	normalizedQuery := strings.ToLower(searchQuery)
+    // PAGINATION & QUERY PARAMETERS
+    page := max(1, atoi(c.Query("page", "1")))
+    perPage := clamp(atoi(c.Query("per_page", "10")), 1, 100)
+    sortDir := c.Query("sort", "asc")
+    searchQuery := strings.TrimSpace(c.Query("s", ""))
+    normalizedQuery := strings.ToLower(searchQuery)
 
-	// DYNAMIC CACHE KEY
-	var cacheKey string
-	if searchQuery == "" {
-		// No search = simple cache key (no sorting applied)
-		cacheKey = "products_backend:all"
-	} else {
-		// With search = include sort direction in cache key
-		cacheKey = fmt.Sprintf("products_backend:s:%s:sort:%s", normalizedQuery, sortDir)
-	}
+    // DYNAMIC CACHE KEY (includes pagination!)
+    cacheKey := fmt.Sprintf("products:p:%d:pp:%d:s:%s:sort:%s", 
+        page, perPage, normalizedQuery, sortDir)
 
-	// 1. CHECK CACHE FIRST
-	if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
-		log.Printf("Cache HIT for %s", cacheKey)
-		var products []ProductListResponse
-		if jsonErr := json.Unmarshal([]byte(cached), &products); jsonErr == nil {
-			return c.JSON(ProductBackendResponse{
-				Cached: true,
-				Data:   products,
-				Query:  searchQuery,
-				Source: "cache",
-				Count:  len(products),
-			})
-		}
-	}
+    log.Printf("📋 Page %d/%d, Search: '%s', Sort: %s", page, perPage, searchQuery, sortDir)
 
-	// 2. CACHE MISS → SMART DB QUERY
-	if searchQuery == "" {
-		log.Printf("Cache MISS → Fetching ALL products (no sorting)")
-	} else {
-		log.Printf("Cache MISS → Searching '%s' sort:%s", searchQuery, sortDir)
-	}
+    // 1. CHECK CACHE FIRST
+    if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
+        log.Printf("Cache HIT for %s", cacheKey)
+        var response ProductBackendResponse
+        if jsonErr := json.Unmarshal([]byte(cached), &response); jsonErr == nil {
+            response.Cached = true
+            response.Source = "cache"
+            return c.JSON(response)
+        }
+    }
 
-	var products []ProductListResponse
-	db := database.DB.Model(&models.Product{}).Select("id, title, description, image, price")
+    // 2. TOTAL COUNT (CRITICAL for pagination)
+    var total int64
+    countDB := database.DB.Model(&models.Product{})
+    if searchQuery != "" {
+        searchTerm := "%" + normalizedQuery + "%"
+        countDB = countDB.Where("LOWER(title) LIKE ? OR LOWER(description) LIKE ?", 
+            searchTerm, searchTerm)
+    }
+    if err := countDB.Count(&total).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to count products",
+        })
+    }
 
-	// APPLY SEARCH FILTER (only if search query exists)
-	if searchQuery != "" {
-		searchTerm := "%" + normalizedQuery + "%"
-		db = db.Where("LOWER(title) LIKE ? OR LOWER(description) LIKE ?", searchTerm, searchTerm)
-		
-		// APPLY SORTING (only when searching)
-		if sortDir == "desc" {
-			db = db.Order("price DESC, id ASC")
-		} else {
-			db = db.Order("price ASC, id ASC")
-		}
-	} else {
-		// NO SEARCH = Just order by ID (natural order)
-		db = db.Order("id ASC")
-	}
+    // 3. PAGINATED DATA QUERY
+    var products []ProductListResponse
+    db := database.DB.Model(&models.Product{}).
+        Select("id, title, description, image, price").
+        Offset((page - 1) * perPage).  // OFFSET
+        Limit(perPage)                 // LIMIT (10 items max!)
 
-	// EXECUTE QUERY
-	if err := db.Find(&products).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "failed to fetch products",
-		})
-	}
+    // 🔍 APPLY SEARCH
+    if searchQuery != "" {
+        searchTerm := "%" + normalizedQuery + "%"
+        db = db.Where("LOWER(title) LIKE ? OR LOWER(description) LIKE ?", 
+            searchTerm, searchTerm)
+    }
 
-	// 3. CACHE RESULTS
-	if jsonData, err := json.Marshal(products); err == nil {
-		ttl := 10 * time.Minute
-		database.CacheSet(ctx, cacheKey, jsonData, ttl)
-		log.Printf("Cached %d products for key '%s'", len(products), cacheKey)
-	}
+    // SORTING LOGIC
+    if searchQuery != "" {
+        // SEARCH → PRICE SORTING
+        if sortDir == "desc" {
+            db = db.Order("price DESC, id ASC")
+        } else {
+            db = db.Order("price ASC, id ASC")
+        }
+        log.Printf("PRICE SORT (search: %s)", searchQuery)
+    } else {
+        // NO SEARCH → ID SORTING
+        if sortDir == "desc" {
+            db = db.Order("id DESC")
+        } else {
+            db = db.Order("id ASC")
+        }
+        log.Printf("ID SORT")
+    }
 
-	return c.JSON(ProductBackendResponse{
-		Cached: false,
-		Data:   products,
-		Query:  searchQuery,
-		Source: "database",
-		Count:  len(products),
-	})
+    if err := db.Find(&products).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "failed to fetch products",
+        })
+    }
+
+    // 4. CALCULATE LAST PAGE
+    lastPage := int(math.Ceil(float64(total) / float64(perPage)))
+
+    // 5. PERFECT RESPONSE
+    response := ProductBackendResponse{
+        Cached:     false,
+        TotalCount:  total,
+        Data:       products,
+        Query:      searchQuery,
+        Source:     "database",
+        Page:       page,
+        PerPage:    perPage,
+        LastPage:   lastPage,
+    }
+
+    // 6. CACHE FULL RESPONSE
+    if jsonData, err := json.Marshal(response); err == nil {
+        ttl := 10 * time.Minute
+        database.CacheSet(ctx, cacheKey, jsonData, ttl)
+        log.Printf("Cached page %d/%d (%d/%d items)", page, lastPage, len(products), total)
+    }
+
+    return c.JSON(response)
+}
+
+// Helper functions
+func atoi(s string) int {
+    i, _ := strconv.Atoi(s)
+    return i
+}
+
+func max(a, b int) int {
+    if a > b { return a }
+    return b
+}
+
+func clamp(v, min, max int) int {
+    if v < min { return min }
+    if v > max { return max }
+    return v
 }
