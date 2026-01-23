@@ -3,7 +3,6 @@ package controllers
 import (
 	"ambassador/src/database"
 	"ambassador/src/models"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -127,7 +126,7 @@ func CreateProducts(c *fiber.Ctx) error {
     }
 
     // INSTANT CACHE INVALIDATION - REDIS
-    ClearProductCaches(c.Context())
+    database.ClearProductCaches(c.Context(),  uint(product.ID))
 
     // MANUAL MAPPING - Exact control
     return c.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -303,7 +302,7 @@ func UpdateProduct(c *fiber.Ctx) error {
     }
 
     // NSTANT CACHE INVALIDATION - REDIS
-    ClearProductCaches(c.Context())
+    database.ClearProductCaches(c.Context(),  existingProduct.ID)
 
 	// Return shaped response (same as GetProduct)
     response := ProductResponse{
@@ -370,7 +369,7 @@ func DeleteProduct(c *fiber.Ctx) error {
     }
 
      //  INSTANT CACHE INVALIDATION - REDIS
-    ClearProductCaches(c.Context())
+    database.ClearProductCaches(c.Context(),  existingProduct.ID)
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
         "message":       "product deleted successfully",
@@ -562,24 +561,6 @@ func ProductBackend(c *fiber.Ctx) error {
     return c.JSON(response)
 }
 
-//  Clear ALL product caches instantly
-func ClearProductCaches(ctx context.Context) {
-    go func() {
-        // Nuclear option - clear ALL your caches
-        keys := []string{
-            "products_frontend:all",
-            "products_admin",
-            "products:p:1:pp:10:s::sort:asc",  // Common backend page 1
-            "products:p:1:pp:10:s::sort:desc",
-            "product:*",  // All single products (manual)
-        }
-        
-        for _, key := range keys {
-            database.CacheDelete(ctx, key)
-            log.Printf("NUKED: %s", key)
-        }
-    }()
-}
 
 
 
