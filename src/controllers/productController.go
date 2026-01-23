@@ -3,6 +3,7 @@ package controllers
 import (
 	"ambassador/src/database"
 	"ambassador/src/models"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,12 +41,30 @@ type ProductListResponse struct {
 }
 
 func Products(c *fiber.Ctx) error {
-	var products  []ProductListResponse
+    ctx := c.Context()
+    cacheKey := "products_admin" // Admin-specific cache
 
-	// Fetch ALL products with ONLY needed fields
-	if err := database.DB.
+    // 1. CHECK REDIS CACHE FIRST (5ms)
+    if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
+        log.Printf(" Cache HIT - Products (admin)")
+        var products []ProductListResponse
+        if jsonErr := json.Unmarshal([]byte(cached), &products); jsonErr == nil {
+            return c.JSON(fiber.Map{
+                "data":   products,
+                "source": "cache",
+                "cached": true,
+            })
+        }
+    }
+
+    // 2. CACHE MISS → DB QUERY (200ms)
+    log.Printf("Cache MISS → Fetching admin products")
+    var products []ProductListResponse
+    
+    if err := database.DB.
         Model(&models.Product{}).
         Select("id, title, description, image, price").
+        Order("id ASC"). // Consistent order
         Find(&products).Error; err != nil {
         
         log.Printf("Failed to fetch products: %v", err)
@@ -54,8 +73,20 @@ func Products(c *fiber.Ctx) error {
         })
     }
 
- 	return c.JSON(products) 
+    // 3. CACHE RESULTS (5min TTL)
+    if jsonData, err := json.Marshal(products); err == nil {
+        ttl := 5 * time.Minute
+        database.CacheSet(ctx, cacheKey, jsonData, ttl)
+        log.Printf("Cached %d admin products (5min)", len(products))
+    }
+
+    return c.JSON(fiber.Map{
+        "data":   products,
+        "source": "database",
+        "cached": false,
+    })
 }
+
 
 func CreateProducts(c *fiber.Ctx) error {
 	var data CreateProductRequest
@@ -95,6 +126,9 @@ func CreateProducts(c *fiber.Ctx) error {
         return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create"})
     }
 
+    // INSTANT CACHE INVALIDATION - REDIS
+    ClearProductCaches(c.Context())
+
     // MANUAL MAPPING - Exact control
     return c.Status(fiber.StatusCreated).JSON(fiber.Map{
         "message": "product created successfully",
@@ -105,33 +139,51 @@ func CreateProducts(c *fiber.Ctx) error {
             Image:       product.Image,
             Price:       product.Price,
         },
+        "cache_cleared": true,
     })
 }
 
 
 
 func GetProduct(c *fiber.Ctx) error {
-	// Parse & validate ID (same pattern as Register)
-	idStr := c.Params("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		 return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+    // Parse & validate ID (unchanged)
+    idStr := c.Params("id")
+    id, err := strconv.Atoi(idStr)
+    if err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
             "error": "invalid product ID",
         })
-	}
+    }
 
-	if id <= 0 {
+    if id <= 0 {
         return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
             "error": "product ID must be positive",
         })
     }
 
-	// Fetch product with error handling (same as Products)
-	var product ProductResponse
+    ctx := c.Context()
+    cacheKey := fmt.Sprintf("product:%d", id) // "product:123"
+
+    // 1. CHECK REDIS CACHE FIRST 2ms)
+    if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
+        log.Printf("Cache HIT - Product %d", id)
+        var product ProductResponse
+        if jsonErr := json.Unmarshal([]byte(cached), &product); jsonErr == nil {
+            return c.JSON(fiber.Map{
+                "data":   product,
+                "source": "cache",
+                "cached": true,
+            })
+        }
+    }
+
+    // 2. CACHE MISS → DB QUERY (10ms)
+    log.Printf("Cache MISS → Product %d", id)
+    var product ProductResponse
     if err := database.DB.
         Model(&models.Product{}).
         Where("id = ?", id).
-        Select("id, title, description, image, price").  
+        Select("id, title, description, image, price").
         First(&product).Error; err != nil {
         
         if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -146,8 +198,20 @@ func GetProduct(c *fiber.Ctx) error {
         })
     }
 
-	 return c.JSON(product)
+    // 3. CACHE SINGLE PRODUCT (15min TTL - longer for single items)
+    if jsonData, err := json.Marshal(product); err == nil {
+        ttl := 15 * time.Minute // Single product = longer cache
+        database.CacheSet(ctx, cacheKey, jsonData, ttl)
+        log.Printf("Cached product %d (15min)", id)
+    }
+
+    return c.JSON(fiber.Map{
+        "data":   product,
+        "source": "database",
+        "cached": false,
+    })
 }
+
 
 type UpdateProductRequest struct {
     Title       string  `json:"title" validate:"omitempty,min=1,max=255"`
@@ -238,6 +302,9 @@ func UpdateProduct(c *fiber.Ctx) error {
         })
     }
 
+    // NSTANT CACHE INVALIDATION - REDIS
+    ClearProductCaches(c.Context())
+
 	// Return shaped response (same as GetProduct)
     response := ProductResponse{
         ID:          existingProduct.ID,
@@ -247,9 +314,11 @@ func UpdateProduct(c *fiber.Ctx) error {
         Price:       existingProduct.Price,
     }
 
-    return c.JSON(fiber.Map{
-        "message": "product updated successfully",
-        "data":    response,
+   return c.JSON(fiber.Map{
+        "message":       "product updated successfully",
+        "data":          response,
+        "cache_cleared": true,     
+        "updated_id":    id,
     })
 }
 
@@ -300,40 +369,51 @@ func DeleteProduct(c *fiber.Ctx) error {
         })
     }
 
+     //  INSTANT CACHE INVALIDATION - REDIS
+    ClearProductCaches(c.Context())
+
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-    	"message": "product deleted successfully",
-	})
+        "message":       "product deleted successfully",
+        "deleted_id":    id,
+        "cache_cleared": true,  // Professional feedback
+    })
+}
+
+
+type ProductFrontendResponse struct {
+    Data     []ProductListResponse `json:"data"`
+    Total    int64                 `json:"total"`
+    Source   string                `json:"source"`
+    Cached   bool                  `json:"cached"`
+    Updated  time.Time             `json:"updated_at"` // Freshness indicator
 }
 
 func ProductFrontEnd(c *fiber.Ctx) error {
     ctx := c.Context()
-    cacheKey := "products_frontend"
+    cacheKey := "products_frontend:all" // Simple key - ALL products
 
-    // 1. CHECK CACHE FIRST (8ms)
-    if cached, err := database.CacheGet(ctx,cacheKey); err == nil {
-       log.Printf("Cache HIT for %s", cacheKey)
-
-         // Parse cached JSON back to products
-         var products []ProductListResponse
-          if jsonErr := json.Unmarshal([]byte(cached), &products); jsonErr != nil {
-            log.Printf("Cache parse error: %v", jsonErr)
-            // Continue to DB on parse error
-        }else {
-             return c.JSON(fiber.Map{
-                "data": products,
-                "source": "cache", // Debug info
-                "cached": true,
-            })
+    // 1. CHECK CACHE FIRST ( 8ms)
+    if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
+        log.Printf("Cache HIT for %s", cacheKey)
+        var response ProductFrontendResponse
+        if jsonErr := json.Unmarshal([]byte(cached), &response); jsonErr == nil {
+            response.Cached = true
+            return c.JSON(response)
         }
     }
 
-    // 2. CACHE MISS → DB query (200ms)
-    log.Printf("Cache MISS -> Querying database for %s", cacheKey)
-    var products []ProductListResponse
+    // 2. CACHE MISS → FETCH ALL PRODUCTS (200ms)
+    log.Printf("Cache MISS → Fetching ALL %d products", 52) // Known total
     
+    var products []ProductListResponse
+    var total int64
+    
+    // COUNT + FETCH ALL (ordered by ID)
     if err := database.DB.
         Model(&models.Product{}).
+        Count(&total).
         Select("id, title, description, image, price").
+        Order("id ASC").
         Find(&products).Error; err != nil {
         
         log.Printf("Failed to fetch products: %v", err)
@@ -341,25 +421,29 @@ func ProductFrontEnd(c *fiber.Ctx) error {
             "error": "failed to fetch products",
         })
     }
-    
-    // 3. CACHE RESULT (JSON → Redis, 10min TTL)
-    if jsonData, err := json.Marshal(products); err == nil {
-        ttl := 10 * time.Minute
-        if err := database.CacheSet(ctx, cacheKey, jsonData, ttl); err == nil {
-            log.Printf("Cached %d products for %v", len(products), ttl)
-        }
+
+    // 3. BUILD RESPONSE WITH TIMESTAMP
+    response := ProductFrontendResponse{
+        Data:    products,
+        Total:   total,
+        Source:  "database",
+        Cached:  false,
+        Updated: time.Now(),
+    }
+
+    // 4. CACHE FULL RESPONSE (5min TTL)
+    if jsonData, err := json.Marshal(response); err == nil {
+        ttl := 5 * time.Minute //  SHORTER TTL
+        database.CacheSet(ctx, cacheKey, jsonData, ttl)
+        log.Printf("Cached %d products (5min TTL)", len(products))
     }
     
-    return c.JSON(fiber.Map{
-        "data": products,
-        "source": "database",
-        "cached": false,
-    })
+    return c.JSON(response)
 }
 
 type ProductBackendResponse struct {
     Cached  bool                   `json:"cached"`
-    TotalCount   int64              `json:"total_count"`
+    TotalCount   int64             `json:"total_count"`
     Data    []ProductListResponse  `json:"data"`
     Query   string                 `json:"query"`
     Source  string                 `json:"source"`
@@ -387,7 +471,7 @@ func ProductBackend(c *fiber.Ctx) error {
     cacheKey := fmt.Sprintf("products:p:%d:pp:%d:s:%s:sort:%s", 
         page, perPage, normalizedQuery, sortDir)
 
-    log.Printf("📋 Page %d/%d, Search: '%s', Sort: %s", page, perPage, searchQuery, sortDir)
+    log.Printf("Page %d/%d, Search: '%s', Sort: %s", page, perPage, searchQuery, sortDir)
 
     // 1. CHECK CACHE FIRST
     if cached, err := database.CacheGet(ctx, cacheKey); err == nil {
@@ -421,7 +505,7 @@ func ProductBackend(c *fiber.Ctx) error {
         Offset((page - 1) * perPage).  // OFFSET
         Limit(perPage)                 // LIMIT (10 items max!)
 
-    // 🔍 APPLY SEARCH
+    // APPLY SEARCH
     if searchQuery != "" {
         searchTerm := "%" + normalizedQuery + "%"
         db = db.Where("LOWER(title) LIKE ? OR LOWER(description) LIKE ?", 
@@ -477,6 +561,27 @@ func ProductBackend(c *fiber.Ctx) error {
 
     return c.JSON(response)
 }
+
+//  Clear ALL product caches instantly
+func ClearProductCaches(ctx context.Context) {
+    go func() {
+        // Nuclear option - clear ALL your caches
+        keys := []string{
+            "products_frontend:all",
+            "products_admin",
+            "products:p:1:pp:10:s::sort:asc",  // Common backend page 1
+            "products:p:1:pp:10:s::sort:desc",
+            "product:*",  // All single products (manual)
+        }
+        
+        for _, key := range keys {
+            database.CacheDelete(ctx, key)
+            log.Printf("NUKED: %s", key)
+        }
+    }()
+}
+
+
 
 // Helper functions
 func atoi(s string) int {
