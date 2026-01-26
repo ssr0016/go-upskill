@@ -2,10 +2,14 @@ package controllers
 
 import (
 	"ambassador/src/database"
+	"ambassador/src/middlewares"
 	"ambassador/src/models"
+	"fmt"
+	"math/rand"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 type LinkResponse struct {
@@ -59,3 +63,93 @@ func Link(c *fiber.Ctx) error {
         "links": links,
     })
 }	
+
+type CreateLinkRequest struct {
+    Products []int `json:"products"`
+}
+
+func CreateLink(c *fiber.Ctx) error {
+    var request CreateLinkRequest
+    if err := c.BodyParser(&request); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "Invalid request body",
+        })
+    }
+
+    if len(request.Products) == 0 {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "At least one product required",
+        })
+    }
+
+    userID, err := middlewares.GetUserID(c)
+    if err != nil {
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "Unauthorized",
+        })
+    }
+
+    // Create link
+    link := models.Link{
+        UserID: userID,
+        Code:   generateLinkCode(),
+    }
+
+    if err := database.DB.Create(&link).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "Failed to create link",
+        })
+    }
+
+    // Associate products
+    if err := associateProducts(database.DB, &link, request.Products); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": err.Error(),
+        })
+    }
+
+    // Return preloaded result
+    var result models.Link
+    if err := database.DB.
+        Preload("User").
+        Preload("Products").
+        First(&result, link.ID).Error; err != nil {
+        
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "Failed to fetch link",
+        })
+    }
+
+    return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+        "link": result,
+    })
+}
+
+func generateLinkCode() string {
+    b := make([]byte, 7)
+    charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    for i := range b {
+        b[i] = charset[rand.Intn(len(charset))]
+    }
+    return string(b)
+}
+
+func associateProducts(db *gorm.DB, link *models.Link, productIDs []int) error {
+    if len(productIDs) == 0 {
+        return nil
+    }
+
+    // Verify products exist
+    var products []models.Product
+    if err := db.Where("id IN ?", productIDs).Find(&products).Error; err != nil {
+        return fmt.Errorf("database error: %w", err)
+    }
+
+    if len(products) != len(productIDs) {
+        return fmt.Errorf("products not found: expected %d, got %d", 
+            len(productIDs), len(products))
+    }
+
+    // Save associations
+    return db.Model(link).Association("Products").Append(products)
+}
