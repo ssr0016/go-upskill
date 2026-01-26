@@ -23,7 +23,11 @@ func main() {
     }
     defer database.Close()
 
-    fmt.Println("Creating 100 fake orders using your 30 ambassadors...")
+    fmt.Println(" Clearing old data...")
+    database.DB.Exec("DELETE FROM order_items")
+    database.DB.Exec("DELETE FROM orders")
+
+    fmt.Println(" Creating 100 REAL revenue orders for ambassadors...")
 
     var users []models.User
     var products []models.Product
@@ -44,10 +48,13 @@ func main() {
     var createdCount int
 
     for i := 0; i < 100; i++ {
-        // Use your existing ambassadors (IDs 6-35)
-        user := users[rand.Intn(len(users))]
+        // 🔥 FIX 1: Pick RANDOM ambassador (not buyer)
+        ambassador := users[rand.Intn(len(users))]
+        
+        // 🔥 FIX 2: Random BUYER (NOT ambassador)
+        buyerID := uint(rand.Intn(1000) + 1)
+        
         numItems := rand.Intn(3) + 1
-
         address := fmt.Sprintf("%d %s", rand.Intn(999)+1, streetNames[rand.Intn(len(streetNames))])
         city := cities[rand.Intn(len(cities))]
         country := countries[rand.Intn(len(countries))]
@@ -55,9 +62,9 @@ func main() {
 
         order := models.Order{
             TransactionID:   fmt.Sprintf("txn_%08d", i+1000),
-            UserID:          user.ID,  //  the existing ambassadors 6-35
-            Code:            fmt.Sprintf("ORDER%03d", i+1),
-            AmbassadorEmail: faker.Email(),
+            UserID:          buyerID,                    //  Different buyer
+            Code:            fmt.Sprintf("ORD%07d", i+1), //  8 chars max!
+            AmbassadorEmail: ambassador.Email,           //  REAL ambassador email!
             FirstName:       faker.FirstName(),
             LastName:        faker.LastName(),
             Email:           faker.Email(),
@@ -65,34 +72,40 @@ func main() {
             City:            city,
             Country:         country,
             Zip:             zip,
-            Complete:        rand.Float64() > 0.3, // 70% complete
+            Complete:        true,                        // ✅ Always complete
         }
 
-        // Add 1-3 random products
+        // Add 1-3 random products with REAL revenue
         order.OrderItems = make([]models.OrderItem, numItems)
+        totalRevenue := 0.0
         for j := 0; j < numItems; j++ {
             product := products[rand.Intn(len(products))]
             qty := uint(rand.Intn(3) + 1)
+            itemRevenue := product.Price * float64(qty) * 0.3
+            totalRevenue += itemRevenue
+            
             order.OrderItems[j] = models.OrderItem{
                 ProductID:         product.ID,
                 ProductTitle:      product.Title,
                 Price:             product.Price,
                 Quantity:          qty,
                 AdminRevenue:      product.Price * float64(qty) * 0.7,
-                AmbassadorRevenue: product.Price * float64(qty) * 0.3,
+                AmbassadorRevenue: itemRevenue, // Ambassador gets 30%
             }
         }
 
         if err := database.DB.Create(&order).Error; err != nil {
-            fmt.Printf("Failed order %d: %v\n", i, err)
+            fmt.Printf("❌ Failed order %d: %v\n", i, err)
             continue
         }
 
         createdCount++
         if createdCount%10 == 0 {
-            fmt.Printf("Created %d/100 orders\n", createdCount)
+            fmt.Printf("Created %d/100 orders (Jaquan got $%.2f so far)\n", createdCount, totalRevenue)
         }
     }
 
-    fmt.Printf("\n Successfully created %d orders for your %d ambassadors!\n", createdCount, len(users))
+    fmt.Printf("\nSUCCESS! Created %d REAL revenue orders!\n", createdCount)
+    fmt.Println("Test now:")
+    fmt.Println("curl -H \"Authorization: Bearer YOUR_TOKEN\" http://localhost:8000/api/ambassador/rankings")
 }

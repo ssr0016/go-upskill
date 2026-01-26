@@ -81,9 +81,11 @@ func Setup(app *fiber.App, cfg *config.Config) {
     ambassadorAuthenticated.Post("/links", controllers.CreateLink)
     ambassadorAuthenticated.Get("/stats", controllers.Stats)
 
-
     // Orders
     ambassadorAuthenticated.Get("/orders", controllers.Orders)
+
+    // Rankings
+    ambassadorAuthenticated.Get("/rankings", controllers.Rankings)
 }
 
 // setupGlobalMiddleware configures middleware for all routes

@@ -43,3 +43,38 @@ func Ambassadors(c *fiber.Ctx) error {
         "is_success": true,
     })
 }
+
+type Ranking struct {
+    ID      uint    `json:"id"`
+    Name    string  `json:"name"`
+    Email   string  `json:"email"`
+    Revenue float64 `json:"revenue"`
+}
+
+type RankingResponse struct {
+    Name   string  `json:"name"`
+    Revenue float64 `json:"revenue"`
+}
+
+func Rankings(c *fiber.Ctx) error {
+    var users []models.User
+    if err := database.DB.
+        Where("is_ambassador = ?", true).
+        Find(&users).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "Failed to fetch ambassadors",
+        })
+    }
+
+    rankings := make(map[string]float64)
+    for _, user := range users {
+        revenue := user.CalculateRevenue(database.DB)
+        rankings[user.Name()] = revenue
+    }
+
+    return c.JSON(fiber.Map{
+        "data": rankings,
+        "count": len(rankings),
+        "is_success": true,
+    })
+}

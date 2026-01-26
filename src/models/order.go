@@ -30,6 +30,8 @@ type OrderItem struct {
     Quantity          uint    `gorm:"not null;default:1" json:"quantity" validate:"required,gte=1"`
     AdminRevenue      float64 `gorm:"type:decimal(10,2);not null;default:0" json:"admin_revenue" validate:"required,gte=0"`
     AmbassadorRevenue float64 `gorm:"type:decimal(10,2);not null;default:0" json:"ambassador_revenue" validate:"required,gte=0"`
+
+    Order             Order   `gorm:"foreignKey:OrderID" json:"-"`
 }
 
 func (order *Order) FullName() string {
