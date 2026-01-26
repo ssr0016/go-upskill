@@ -70,6 +70,7 @@ type CreateLinkRequest struct {
 
 func CreateLink(c *fiber.Ctx) error {
     var request CreateLinkRequest
+
     if err := c.BodyParser(&request); err != nil {
         return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
             "error": "Invalid request body",
@@ -124,6 +125,65 @@ func CreateLink(c *fiber.Ctx) error {
         "link": result,
     })
 }
+
+
+type LinkStat struct {
+    Code    string  `json:"code"`
+    Count   int     `json:"count"`
+    Revenue float64 `json:"revenue"`
+}
+
+func Stats(c *fiber.Ctx) error {
+    userID, err := middlewares.GetUserID(c)
+    if err != nil {
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "Unauthorized",
+        })
+    }
+
+    // Get user's links
+    var links []models.Link
+    if err := database.DB.
+        WithContext(c.Context()).
+        Where("user_id = ?", userID).
+        Find(&links).Error; err != nil {
+        
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": "Failed to fetch links",
+        })
+    }
+
+    var result []LinkStat
+
+    // Calculate stats per link
+    for _, link := range links {
+        // Get completed orders for this link
+        var orders []models.Order
+        if err := database.DB.
+            WithContext(c.Context()).
+            Preload("OrderItems").
+            Where("code = ? AND complete = ?", link.Code, true).
+            Find(&orders).Error; err != nil {
+            
+            continue // Skip this link if error
+        }
+
+        // Calculate revenue
+        revenue := 0.0
+        for _, order := range orders {
+            revenue += order.GetTotal()
+        }
+
+        result = append(result, LinkStat{
+            Code:    link.Code,
+            Count:   len(orders),
+            Revenue: revenue,
+        })
+    }
+
+    return c.JSON(result)
+}
+
 
 func generateLinkCode() string {
     b := make([]byte, 7)
